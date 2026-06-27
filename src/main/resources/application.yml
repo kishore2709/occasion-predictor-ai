@@ -1,0 +1,32 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: occasion-predictor-ai
+
+  ai:
+    ollama:
+      base-url: http://localhost:11434
+  chat:
+    model: llama3.1:latest
+    options:
+      temperature: 0.1
+      top-k: 40
+      top-p: 0.9
+      num-predict: 500
+  embedding:
+    model: nomic-embed-text:latest
+
+logging:
+  level:
+    org.springframework.ai: INFO
+    org.kishorereddy.occasionpredictor: DEBUG
+
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    operations-sorter: method
+    tags-sorter: alpha
