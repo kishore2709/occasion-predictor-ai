@@ -8,4 +8,6 @@ import java.util.UUID;
 
 public interface PredictionRepository extends JpaRepository<Prediction, UUID> {
     List<Prediction> findByOrderId(String orderId);
+
+    java.util.Optional<Prediction> findFirstByOrderIdOrderByCreatedAtDesc(String orderId);
 }

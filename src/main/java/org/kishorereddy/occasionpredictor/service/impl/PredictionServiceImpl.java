@@ -13,6 +13,7 @@ import org.kishorereddy.occasionpredictor.repository.PromptVersionRepository;
 import org.kishorereddy.occasionpredictor.service.PredictionService;
 import org.kishorereddy.occasionpredictor.service.PredictionWorkflow;
 import org.kishorereddy.occasionpredictor.service.cache.PredictionCacheService;
+import org.kishorereddy.occasionpredictor.service.kafka.PredictionEventPublisher;
 import org.kishorereddy.occasionpredictor.service.rag.RagPromptBuilder;
 import org.kishorereddy.occasionpredictor.service.rag.RagRetriever;
 import org.slf4j.Logger;
@@ -53,6 +54,7 @@ public class PredictionServiceImpl implements PredictionService {
     private final RagRetriever ragRetriever;
     private final RagPromptBuilder ragPromptBuilder;
     private final PredictionCacheService cacheService;
+    private final PredictionEventPublisher eventPublisher;
     private final PredictionRepository predictionRepository;
     private final PredictionAuditRepository auditRepository;
     private final PromptVersionRepository promptVersionRepository;
@@ -62,16 +64,18 @@ public class PredictionServiceImpl implements PredictionService {
                                  RagRetriever ragRetriever,
                                  RagPromptBuilder ragPromptBuilder,
                                  PredictionCacheService cacheService,
+                                 PredictionEventPublisher eventPublisher,
                                  PredictionRepository predictionRepository,
                                  PredictionAuditRepository auditRepository,
                                  PromptVersionRepository promptVersionRepository,
                                  ModelVersionRepository modelVersionRepository) {
-        this.predictionWorkflow    = predictionWorkflow;
-        this.ragRetriever          = ragRetriever;
-        this.ragPromptBuilder      = ragPromptBuilder;
-        this.cacheService          = cacheService;
-        this.predictionRepository  = predictionRepository;
-        this.auditRepository       = auditRepository;
+        this.predictionWorkflow      = predictionWorkflow;
+        this.ragRetriever            = ragRetriever;
+        this.ragPromptBuilder        = ragPromptBuilder;
+        this.cacheService            = cacheService;
+        this.eventPublisher          = eventPublisher;
+        this.predictionRepository    = predictionRepository;
+        this.auditRepository         = auditRepository;
         this.promptVersionRepository = promptVersionRepository;
         this.modelVersionRepository  = modelVersionRepository;
     }
@@ -85,76 +89,90 @@ public class PredictionServiceImpl implements PredictionService {
             return cached.get();
         }
 
+        // Announce that a prediction has been requested (audit / replay use)
+        eventPublisher.publishPredictionRequested(request);
+
         PromptVersion promptVersion = promptVersionRepository.findByActiveTrue().orElse(null);
         ModelVersion  modelVersion  = modelVersionRepository.findByActiveTrue().orElse(null);
 
-        // 1. Retrieve relevant RAG chunks from pgvector (or Redis cache)
-        List<Document> chunks = ragRetriever.retrieve(request);
-        log.debug("order={} rag_chunks={}", request.orderId(), chunks.size());
+        try {
+            // 1. Retrieve relevant RAG chunks from pgvector (or Redis cache)
+            List<Document> chunks = ragRetriever.retrieve(request);
+            log.debug("order={} rag_chunks={}", request.orderId(), chunks.size());
 
-        // 2. Build the final prompt: system instructions + context + order details
-        String systemInstructions = promptVersion != null
-                ? promptVersion.getTemplate()
-                : DEFAULT_SYSTEM_INSTRUCTIONS;
-        String prompt = ragPromptBuilder.build(systemInstructions, chunks, request);
+            // 2. Build the final prompt: system instructions + context + order details
+            String systemInstructions = promptVersion != null
+                    ? promptVersion.getTemplate()
+                    : DEFAULT_SYSTEM_INSTRUCTIONS;
+            String prompt = ragPromptBuilder.build(systemInstructions, chunks, request);
 
-        // 3. Call the LLM
-        long startTime = System.currentTimeMillis();
-        PredictionWorkflow.LlmResult result = predictionWorkflow.call(prompt);
-        long latencyMs = System.currentTimeMillis() - startTime;
+            // 3. Call the LLM
+            long startTime = System.currentTimeMillis();
+            PredictionWorkflow.LlmResult result = predictionWorkflow.call(prompt);
+            long latencyMs = System.currentTimeMillis() - startTime;
 
-        String source = modelVersion != null
-                ? modelVersion.getProvider() + "_" + modelVersion.getModelName()
-                : "OLLAMA_CHAT_CLIENT";
+            String source = modelVersion != null
+                    ? modelVersion.getProvider() + "_" + modelVersion.getModelName()
+                    : "OLLAMA_CHAT_CLIENT";
 
-        // 4. Persist prediction
-        Prediction prediction = new Prediction();
-        prediction.setOrderId(request.orderId());
-        prediction.setRecipientName(request.recipientName());
-        prediction.setRecipientRelation(request.recipientRelation());
-        prediction.setProductName(request.productName());
-        prediction.setProductCategory(request.productCategory());
-        prediction.setOrderDate(request.orderDate());
-        prediction.setGiftMessage(request.giftMessage());
-        prediction.setPredictedOccasion(result.occasion());
-        prediction.setConfidenceScore(result.confidence());
-        prediction.setReason(result.reason());
-        prediction.setEvidence(result.evidence());
-        prediction.setPredictionSource(source);
-        prediction.setPromptVersion(promptVersion);
-        prediction.setModelVersion(modelVersion);
-        predictionRepository.save(prediction);
+            // 4. Persist prediction
+            Prediction prediction = new Prediction();
+            prediction.setOrderId(request.orderId());
+            prediction.setRecipientName(request.recipientName());
+            prediction.setRecipientRelation(request.recipientRelation());
+            prediction.setProductName(request.productName());
+            prediction.setProductCategory(request.productCategory());
+            prediction.setOrderDate(request.orderDate());
+            prediction.setGiftMessage(request.giftMessage());
+            prediction.setPredictedOccasion(result.occasion());
+            prediction.setConfidenceScore(result.confidence());
+            prediction.setReason(result.reason());
+            prediction.setEvidence(result.evidence());
+            prediction.setPredictionSource(source);
+            prediction.setPromptVersion(promptVersion);
+            prediction.setModelVersion(modelVersion);
+            predictionRepository.save(prediction);
 
-        // 5. Persist audit row with chunk IDs so we can replay which context was used
-        PredictionAudit audit = new PredictionAudit();
-        audit.setPrediction(prediction);
-        audit.setRawPrompt(prompt);
-        audit.setRawResponse(result.rawContent());
-        audit.setModelParameters(result.modelParameters());
-        audit.setRagChunkIds(toJsonArray(chunks));
-        audit.setLatencyMs(latencyMs);
-        auditRepository.save(audit);
+            // 5. Persist audit row with chunk IDs so we can replay which context was used
+            PredictionAudit audit = new PredictionAudit();
+            audit.setPrediction(prediction);
+            audit.setRawPrompt(prompt);
+            audit.setRawResponse(result.rawContent());
+            audit.setModelParameters(result.modelParameters());
+            audit.setRagChunkIds(toJsonArray(chunks));
+            audit.setLatencyMs(latencyMs);
+            auditRepository.save(audit);
 
-        PredictionResponse response = new PredictionResponse(
-                request.orderId(),
-                result.occasion(),
-                result.confidence(),
-                result.reason(),
-                source,
-                result.evidence()
-        );
+            PredictionResponse response = new PredictionResponse(
+                    request.orderId(),
+                    result.occasion(),
+                    result.confidence(),
+                    result.reason(),
+                    source,
+                    result.evidence()
+            );
 
-        // Cache so duplicate orderId requests are served instantly
-        cacheService.cachePrediction(request.orderId(), response);
+            // 6. Cache for idempotency
+            cacheService.cachePrediction(request.orderId(), response);
 
-        return response;
+            // 7. Publish occasion.predicted so downstream consumers can act independently
+            // Note: published inside the transaction — use an outbox pattern in production
+            //       to guarantee publish-only-after-commit.
+            eventPublisher.publishOccasionPredicted(prediction.getId().toString(), response);
+
+            return response;
+
+        } catch (Exception e) {
+            log.error("Prediction failed for orderId={}: {}", request.orderId(), e.getMessage());
+            eventPublisher.publishPredictionFailed(request, e.getMessage());
+            throw e;
+        }
     }
 
     private String toJsonArray(List<Document> chunks) {
         if (chunks.isEmpty()) return "[]";
         return chunks.stream()
                 .map(d -> {
-                    // Prefer the original pgvector ID stored by CachedChunk, fall back to doc ID
                     Object originalId = d.getMetadata().get("_chunk_id");
                     String id = originalId != null ? originalId.toString() : d.getId();
                     return "\"" + id + "\"";
