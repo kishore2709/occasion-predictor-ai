@@ -8,6 +8,7 @@ import org.hibernate.annotations.CreationTimestamp;
 import org.kishorereddy.occasionpredictor.model.OccasionType;
 
 import java.time.LocalDateTime;
+import java.util.List;
 import java.util.UUID;
 
 @Entity
@@ -42,6 +43,10 @@ public class Prediction {
 
     @Column(columnDefinition = "TEXT")
     private String reason;
+
+    @Convert(converter = StringListConverter.class)
+    @Column(columnDefinition = "TEXT")
+    private List<String> evidence;
 
     private String predictionSource;
 

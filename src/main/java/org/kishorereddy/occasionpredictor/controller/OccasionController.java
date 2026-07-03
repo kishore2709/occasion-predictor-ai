@@ -70,7 +70,8 @@ public class OccasionController {
                 p.getPredictedOccasion(),
                 p.getConfidenceScore(),
                 p.getReason(),
-                p.getPredictionSource()
+                p.getPredictionSource(),
+                p.getEvidence()
         );
     }
 }

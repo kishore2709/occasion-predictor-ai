@@ -1,0 +1,81 @@
+{
+  "holidays": [
+    {
+      "occasion": "CHRISTMAS",
+      "name": "Christmas",
+      "month": 12,
+      "fixed_day": 25,
+      "lead_days": 35,
+      "country": "US",
+      "description": "Annual celebration on December 25. Peak gifting window: November 20 to December 25. Common gifts include toys, electronics, clothing, and food hampers."
+    },
+    {
+      "occasion": "CHRISTMAS",
+      "name": "Christmas",
+      "month": 12,
+      "fixed_day": 25,
+      "lead_days": 35,
+      "country": "UK",
+      "description": "Annual celebration on December 25. Peak gifting window: November 20 to December 25. Common gifts include toys, electronics, clothing, and food hampers."
+    },
+    {
+      "occasion": "VALENTINES_DAY",
+      "name": "Valentine's Day",
+      "month": 2,
+      "fixed_day": 14,
+      "lead_days": 21,
+      "country": "global",
+      "description": "Annual celebration on February 14. Peak gifting window: January 25 to February 14. Common gifts include roses, chocolates, jewellery, and perfume for romantic partners."
+    },
+    {
+      "occasion": "MOTHERS_DAY",
+      "name": "Mother's Day",
+      "month": 5,
+      "week_in_month": 2,
+      "day_of_week": "SUNDAY",
+      "lead_days": 21,
+      "country": "US",
+      "description": "Second Sunday of May in the US. Peak gifting window: late April to second Sunday of May. Common gifts include flowers, spa sets, jewellery, and keepsakes for mothers."
+    },
+    {
+      "occasion": "MOTHERS_DAY",
+      "name": "Mothering Sunday",
+      "month": 3,
+      "week_in_month": 4,
+      "day_of_week": "SUNDAY",
+      "lead_days": 21,
+      "country": "UK",
+      "description": "Fourth Sunday of Lent in the UK, typically falling in mid-to-late March. Peak gifting window starts three weeks before. Common gifts include flowers, chocolates, and spa items for mothers."
+    },
+    {
+      "occasion": "FATHERS_DAY",
+      "name": "Father's Day",
+      "month": 6,
+      "week_in_month": 3,
+      "day_of_week": "SUNDAY",
+      "lead_days": 21,
+      "country": "US",
+      "description": "Third Sunday of June in the US. Peak gifting window: late May to third Sunday of June. Common gifts include gadgets, tools, sporting goods, and spirits for fathers."
+    },
+    {
+      "occasion": "FATHERS_DAY",
+      "name": "Father's Day",
+      "month": 6,
+      "week_in_month": 3,
+      "day_of_week": "SUNDAY",
+      "lead_days": 21,
+      "country": "UK",
+      "description": "Third Sunday of June in the UK. Peak gifting window: late May to third Sunday of June. Common gifts include gadgets, tools, sporting goods, and spirits for fathers."
+    },
+    {
+      "occasion": "THANKSGIVING",
+      "name": "Thanksgiving",
+      "month": 11,
+      "week_in_month": 4,
+      "day_of_week": "THURSDAY",
+      "lead_days": 14,
+      "country": "US",
+      "description": "Fourth Thursday of November in the US. Peak gifting window: early to mid-November. Common gifts include food hampers, wine, table items, and home goods expressing gratitude."
+    }
+  ]
+}

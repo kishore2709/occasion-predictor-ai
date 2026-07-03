@@ -30,6 +30,17 @@ spring:
           num-predict: 200
       embedding:
         model: nomic-embed-text:latest
+    vectorstore:
+      pgvector:
+        initialize-schema: false
+        index-type: hnsw
+        distance-type: cosine_distance
+        dimensions: 768
+
+app:
+  rag:
+    chunk-size: 800
+    chunk-overlap: 100
 
 logging:
   level:

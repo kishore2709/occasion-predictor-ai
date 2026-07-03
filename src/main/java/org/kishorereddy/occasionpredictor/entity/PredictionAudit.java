@@ -30,6 +30,9 @@ public class PredictionAudit {
     @Column(columnDefinition = "TEXT")
     private String rawResponse;
 
+    @Column(columnDefinition = "TEXT")
+    private String modelParameters;
+
     private Long latencyMs;
 
     @CreationTimestamp

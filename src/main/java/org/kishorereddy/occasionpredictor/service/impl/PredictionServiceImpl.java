@@ -4,7 +4,6 @@ import org.kishorereddy.occasionpredictor.entity.ModelVersion;
 import org.kishorereddy.occasionpredictor.entity.Prediction;
 import org.kishorereddy.occasionpredictor.entity.PredictionAudit;
 import org.kishorereddy.occasionpredictor.entity.PromptVersion;
-import org.kishorereddy.occasionpredictor.model.OccasionType;
 import org.kishorereddy.occasionpredictor.model.PredictionRequest;
 import org.kishorereddy.occasionpredictor.model.PredictionResponse;
 import org.kishorereddy.occasionpredictor.repository.ModelVersionRepository;
@@ -25,12 +24,14 @@ public class PredictionServiceImpl implements PredictionService {
 
             Analyze the gift order below and determine the most likely gift occasion.
             Respond with ONLY this JSON object — no explanation, no markdown, no extra text:
-            {"occasion":"OCCASION_NAME","confidence":0.85}
+            {"occasion":"OCCASION_NAME","confidence":0.85,"reason":"One sentence explaining the prediction.","evidence":["signal 1","signal 2"]}
 
-            Allowed values for occasion: BIRTHDAY, ANNIVERSARY, VALENTINES_DAY, MOTHERS_DAY,
-            FATHERS_DAY, CHRISTMAS, THANKSGIVING, UNKNOWN
-
-            Use UNKNOWN when information is insufficient. Confidence: 0.0 = uncertain, 1.0 = certain.
+            Rules:
+            - occasion must be exactly one of: BIRTHDAY, ANNIVERSARY, VALENTINES_DAY, MOTHERS_DAY, FATHERS_DAY, CHRISTMAS, THANKSGIVING, UNKNOWN
+            - confidence must be a decimal between 0.0 and 1.0
+            - Use UNKNOWN with confidence below 0.4 when information is insufficient
+            - reason must be a single sentence
+            - evidence must be a JSON array of 1–3 short strings citing signals from the order
 
             Order Details:
             - Recipient Name: %s
@@ -81,7 +82,6 @@ public class PredictionServiceImpl implements PredictionService {
         String source = modelVersion != null
                 ? modelVersion.getProvider() + "_" + modelVersion.getModelName()
                 : "OLLAMA_CHAT_CLIENT";
-        String reason = buildReason(result.occasion(), request);
 
         Prediction prediction = new Prediction();
         prediction.setOrderId(request.orderId());
@@ -93,7 +93,8 @@ public class PredictionServiceImpl implements PredictionService {
         prediction.setGiftMessage(request.giftMessage());
         prediction.setPredictedOccasion(result.occasion());
         prediction.setConfidenceScore(result.confidence());
-        prediction.setReason(reason);
+        prediction.setReason(result.reason());
+        prediction.setEvidence(result.evidence());
         prediction.setPredictionSource(source);
         prediction.setPromptVersion(promptVersion);
         prediction.setModelVersion(modelVersion);
@@ -103,20 +104,17 @@ public class PredictionServiceImpl implements PredictionService {
         audit.setPrediction(prediction);
         audit.setRawPrompt(prompt);
         audit.setRawResponse(result.rawContent());
+        audit.setModelParameters(result.modelParameters());
         audit.setLatencyMs(latencyMs);
         auditRepository.save(audit);
 
-        return new PredictionResponse(request.orderId(), result.occasion(), result.confidence(), reason, source);
-    }
-
-    private String buildReason(OccasionType occasion, PredictionRequest request) {
-        if (occasion == OccasionType.UNKNOWN) {
-            return "Unable to determine a specific occasion for this gift.";
-        }
-        return "Based on the %s (for %s), this gift is ideal for %s.".formatted(
-                request.productName(),
-                request.recipientRelation(),
-                occasion.name().replace("_", " ").toLowerCase()
+        return new PredictionResponse(
+                request.orderId(),
+                result.occasion(),
+                result.confidence(),
+                result.reason(),
+                source,
+                result.evidence()
         );
     }
 }
