@@ -21,15 +21,15 @@ spring:
   ai:
     ollama:
       base-url: http://localhost:11434
-  chat:
-    model: llama3.1:latest
-    options:
-      temperature: 0.1
-      top-k: 40
-      top-p: 0.9
-      num-predict: 500
-  embedding:
-    model: nomic-embed-text:latest
+      chat:
+        model: llama3:latest
+        options:
+          temperature: 0.1
+          top-k: 40
+          top-p: 0.9
+          num-predict: 200
+      embedding:
+        model: nomic-embed-text:latest
 
 logging:
   level:

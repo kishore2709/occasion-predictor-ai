@@ -12,7 +12,7 @@ import org.kishorereddy.occasionpredictor.repository.PredictionAuditRepository;
 import org.kishorereddy.occasionpredictor.repository.PredictionRepository;
 import org.kishorereddy.occasionpredictor.repository.PromptVersionRepository;
 import org.kishorereddy.occasionpredictor.service.PredictionService;
-import org.springframework.ai.chat.client.ChatClient;
+import org.kishorereddy.occasionpredictor.service.PredictionWorkflow;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -21,32 +21,38 @@ import org.springframework.transaction.annotation.Transactional;
 public class PredictionServiceImpl implements PredictionService {
 
     private static final String DEFAULT_PROMPT_TEMPLATE = """
-            Predict the gift occasion.
+            You are a gift occasion classifier.
 
-            Return only one occasion from:
-            BIRTHDAY, ANNIVERSARY, VALENTINES_DAY, MOTHERS_DAY,
-            FATHERS_DAY, CHRISTMAS, THANKSGIVING, UNKNOWN.
+            Analyze the gift order below and determine the most likely gift occasion.
+            Respond with ONLY this JSON object — no explanation, no markdown, no extra text:
+            {"occasion":"OCCASION_NAME","confidence":0.85}
 
-            Recipient Name: %s
-            Relation: %s
-            Product: %s
-            Category: %s
-            Order Date: %s
-            Gift Message: %s
+            Allowed values for occasion: BIRTHDAY, ANNIVERSARY, VALENTINES_DAY, MOTHERS_DAY,
+            FATHERS_DAY, CHRISTMAS, THANKSGIVING, UNKNOWN
+
+            Use UNKNOWN when information is insufficient. Confidence: 0.0 = uncertain, 1.0 = certain.
+
+            Order Details:
+            - Recipient Name: %s
+            - Relation: %s
+            - Product: %s
+            - Category: %s
+            - Order Date: %s
+            - Gift Message: %s
             """;
 
-    private final ChatClient chatClient;
+    private final PredictionWorkflow predictionWorkflow;
     private final PredictionRepository predictionRepository;
     private final PredictionAuditRepository auditRepository;
     private final PromptVersionRepository promptVersionRepository;
     private final ModelVersionRepository modelVersionRepository;
 
-    public PredictionServiceImpl(ChatClient.Builder chatClientBuilder,
+    public PredictionServiceImpl(PredictionWorkflow predictionWorkflow,
                                  PredictionRepository predictionRepository,
                                  PredictionAuditRepository auditRepository,
                                  PromptVersionRepository promptVersionRepository,
                                  ModelVersionRepository modelVersionRepository) {
-        this.chatClient = chatClientBuilder.build();
+        this.predictionWorkflow = predictionWorkflow;
         this.predictionRepository = predictionRepository;
         this.auditRepository = auditRepository;
         this.promptVersionRepository = promptVersionRepository;
@@ -69,19 +75,13 @@ public class PredictionServiceImpl implements PredictionService {
         );
 
         long startTime = System.currentTimeMillis();
-        String content = chatClient.prompt(prompt).call().content();
+        PredictionWorkflow.LlmResult result = predictionWorkflow.call(prompt);
         long latencyMs = System.currentTimeMillis() - startTime;
 
-        if (content == null || content.isBlank()) {
-            throw new IllegalStateException("Empty response from LLM");
-        }
-
-        OccasionType occasion = parseOccasion(content.trim().toUpperCase());
-        double confidence = occasion == OccasionType.UNKNOWN ? 0.5 : 0.85;
-        String reason = buildReason(occasion, request);
         String source = modelVersion != null
                 ? modelVersion.getProvider() + "_" + modelVersion.getModelName()
                 : "OLLAMA_CHAT_CLIENT";
+        String reason = buildReason(result.occasion(), request);
 
         Prediction prediction = new Prediction();
         prediction.setOrderId(request.orderId());
@@ -91,8 +91,8 @@ public class PredictionServiceImpl implements PredictionService {
         prediction.setProductCategory(request.productCategory());
         prediction.setOrderDate(request.orderDate());
         prediction.setGiftMessage(request.giftMessage());
-        prediction.setPredictedOccasion(occasion);
-        prediction.setConfidenceScore(confidence);
+        prediction.setPredictedOccasion(result.occasion());
+        prediction.setConfidenceScore(result.confidence());
         prediction.setReason(reason);
         prediction.setPredictionSource(source);
         prediction.setPromptVersion(promptVersion);
@@ -102,19 +102,11 @@ public class PredictionServiceImpl implements PredictionService {
         PredictionAudit audit = new PredictionAudit();
         audit.setPrediction(prediction);
         audit.setRawPrompt(prompt);
-        audit.setRawResponse(content);
+        audit.setRawResponse(result.rawContent());
         audit.setLatencyMs(latencyMs);
         auditRepository.save(audit);
 
-        return new PredictionResponse(request.orderId(), occasion, confidence, reason, source);
-    }
-
-    private OccasionType parseOccasion(String llmOutput) {
-        try {
-            return OccasionType.valueOf(llmOutput);
-        } catch (IllegalArgumentException e) {
-            return OccasionType.UNKNOWN;
-        }
+        return new PredictionResponse(request.orderId(), result.occasion(), result.confidence(), reason, source);
     }
 
     private String buildReason(OccasionType occasion, PredictionRequest request) {
