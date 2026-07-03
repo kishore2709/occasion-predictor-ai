@@ -12,6 +12,7 @@ import org.kishorereddy.occasionpredictor.repository.PredictionRepository;
 import org.kishorereddy.occasionpredictor.repository.PromptVersionRepository;
 import org.kishorereddy.occasionpredictor.service.PredictionService;
 import org.kishorereddy.occasionpredictor.service.PredictionWorkflow;
+import org.kishorereddy.occasionpredictor.service.cache.PredictionCacheService;
 import org.kishorereddy.occasionpredictor.service.rag.RagPromptBuilder;
 import org.kishorereddy.occasionpredictor.service.rag.RagRetriever;
 import org.slf4j.Logger;
@@ -21,6 +22,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.stream.Collectors;
 
 @Service
@@ -50,6 +52,7 @@ public class PredictionServiceImpl implements PredictionService {
     private final PredictionWorkflow predictionWorkflow;
     private final RagRetriever ragRetriever;
     private final RagPromptBuilder ragPromptBuilder;
+    private final PredictionCacheService cacheService;
     private final PredictionRepository predictionRepository;
     private final PredictionAuditRepository auditRepository;
     private final PromptVersionRepository promptVersionRepository;
@@ -58,6 +61,7 @@ public class PredictionServiceImpl implements PredictionService {
     public PredictionServiceImpl(PredictionWorkflow predictionWorkflow,
                                  RagRetriever ragRetriever,
                                  RagPromptBuilder ragPromptBuilder,
+                                 PredictionCacheService cacheService,
                                  PredictionRepository predictionRepository,
                                  PredictionAuditRepository auditRepository,
                                  PromptVersionRepository promptVersionRepository,
@@ -65,6 +69,7 @@ public class PredictionServiceImpl implements PredictionService {
         this.predictionWorkflow    = predictionWorkflow;
         this.ragRetriever          = ragRetriever;
         this.ragPromptBuilder      = ragPromptBuilder;
+        this.cacheService          = cacheService;
         this.predictionRepository  = predictionRepository;
         this.auditRepository       = auditRepository;
         this.promptVersionRepository = promptVersionRepository;
@@ -73,10 +78,17 @@ public class PredictionServiceImpl implements PredictionService {
 
     @Override
     public PredictionResponse predict(PredictionRequest request) {
+        // Idempotency: same orderId always returns the same result
+        Optional<PredictionResponse> cached = cacheService.getCachedPrediction(request.orderId());
+        if (cached.isPresent()) {
+            log.info("Returning cached prediction for orderId={}", request.orderId());
+            return cached.get();
+        }
+
         PromptVersion promptVersion = promptVersionRepository.findByActiveTrue().orElse(null);
         ModelVersion  modelVersion  = modelVersionRepository.findByActiveTrue().orElse(null);
 
-        // 1. Retrieve relevant RAG chunks from pgvector
+        // 1. Retrieve relevant RAG chunks from pgvector (or Redis cache)
         List<Document> chunks = ragRetriever.retrieve(request);
         log.debug("order={} rag_chunks={}", request.orderId(), chunks.size());
 
@@ -123,7 +135,7 @@ public class PredictionServiceImpl implements PredictionService {
         audit.setLatencyMs(latencyMs);
         auditRepository.save(audit);
 
-        return new PredictionResponse(
+        PredictionResponse response = new PredictionResponse(
                 request.orderId(),
                 result.occasion(),
                 result.confidence(),
@@ -131,12 +143,22 @@ public class PredictionServiceImpl implements PredictionService {
                 source,
                 result.evidence()
         );
+
+        // Cache so duplicate orderId requests are served instantly
+        cacheService.cachePrediction(request.orderId(), response);
+
+        return response;
     }
 
     private String toJsonArray(List<Document> chunks) {
         if (chunks.isEmpty()) return "[]";
         return chunks.stream()
-                .map(d -> "\"" + d.getId() + "\"")
+                .map(d -> {
+                    // Prefer the original pgvector ID stored by CachedChunk, fall back to doc ID
+                    Object originalId = d.getMetadata().get("_chunk_id");
+                    String id = originalId != null ? originalId.toString() : d.getId();
+                    return "\"" + id + "\"";
+                })
                 .collect(Collectors.joining(",", "[", "]"));
     }
 }

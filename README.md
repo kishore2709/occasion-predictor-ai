@@ -16,6 +16,7 @@ Part of a larger **Gift Reminder AI** platform where predicted occasions drive a
 | Chat model | `llama3:latest` |
 | Embedding model | `nomic-embed-text:latest` (768-dim) |
 | Vector store | pgvector (HNSW index) |
+| Cache | Redis 7 (Lettuce) |
 | Database | PostgreSQL 18 |
 | Migrations | Flyway |
 | Docs | Springdoc OpenAPI / Swagger UI |
@@ -30,6 +31,7 @@ Part of a larger **Gift Reminder AI** platform where predicted occasions drive a
 | Java | 24 | `java -version` |
 | Maven | 3.9+ | `mvn -version` |
 | PostgreSQL | 16+ | With **pgvector extension** installed |
+| Redis | 7+ | `redis-server` or Docker |
 | Ollama | Latest | [ollama.com](https://ollama.com) |
 
 ### Install pgvector
@@ -71,7 +73,7 @@ ollama pull nomic-embed-text
 git clone <repo-url>
 cd occasion-predictor-ai
 
-# 2. Start PostgreSQL (if using Docker)
+# 2. Start PostgreSQL + Redis (if using Docker)
 docker compose up -d
 
 # 3. Start Ollama (in a separate terminal or as a background service)
@@ -84,6 +86,11 @@ mvn spring-boot:run
 On first startup the app will:
 - Run the single Flyway migration (`V1__init.sql`), which enables the `vector` extension, creates all tables, and seeds the prompt and model
 - Ingest the five RAG knowledge-base documents into pgvector via `nomic-embed-text` embeddings (only if the store is empty)
+
+**If running Redis locally (no Docker):**
+```bash
+brew install redis && redis-server
+```
 
 **Swagger UI:** [http://localhost:8080/swagger-ui.html](http://localhost:8080/swagger-ui.html)
 
@@ -143,14 +150,18 @@ POST /api/v1/occasion/predictions
          │
          ▼
  OccasionController
-         │
+         │ RateLimiterService.checkOrThrow(clientIp)  → 429 if exceeded
          ▼
  PredictionServiceImpl
          │
+         ├─► 0. Redis idempotency check
+         │       prediction:{orderId} hit? → return cached response instantly
+         │
          ├─► 1. RagRetriever
          │       │  Build semantic query from request fields
-         │       │  Embed query via nomic-embed-text (Ollama)
-         │       └─► pgvector HNSW search → top-5 chunks
+         │       │  rag:{queryHash} hit? → return cached chunks (skip embed + search)
+         │       │  Cache miss → embed query via nomic-embed-text (Ollama)
+         │       └─► pgvector HNSW search → top-5 chunks → cache in Redis
          │
          ├─► 2. RagPromptBuilder
          │       │  System instructions  (from DB prompt_versions)
@@ -164,10 +175,11 @@ POST /api/v1/occasion/predictions
          │       │  Validate: enum check, confidence range [0,1]
          │       └─► Confidence < 0.4 → force UNKNOWN
          │
-         └─► 4. Persist
+         └─► 4. Persist + cache result
                  predictions        (occasion, confidence, reason, evidence)
                  prediction_audit   (raw prompt, raw response, model params,
                                      rag_chunk_ids, latency_ms)
+                 Redis prediction:{orderId} → cached for 24 h
 ```
 
 ---
@@ -230,6 +242,11 @@ app:
     chunk-overlap: 100
     top-k: 5                    # chunks retrieved per prediction
     similarity-threshold: 0.5   # minimum cosine similarity to include a chunk
+  cache:
+    prediction-ttl-seconds: 86400  # idempotency window per orderId (24 h)
+    rag-ttl-seconds: 1800          # RAG retrieval result cache (30 min)
+  rate-limit:
+    requests-per-minute: 20        # per client IP, fixed window
 ```
 
 ---
@@ -244,5 +261,6 @@ app:
 | 4 | Structured JSON output + hallucination controls + full audit trail | ✅ |
 | 5 | RAG foundation — document ingestion → chunking → pgvector | ✅ |
 | 6 | RAG retrieval in prediction flow — top-k context → RAG prompt | ✅ |
-| 7 | _(planned)_ Feedback loop + confidence calibration | 🔲 |
-| 8 | _(planned)_ Multi-country holiday calendar expansion | 🔲 |
+| 7 | Redis — idempotency cache, RAG retrieval cache, rate limiting | ✅ |
+| 8 | _(planned)_ Feedback loop + confidence calibration | 🔲 |
+| 9 | _(planned)_ Multi-country holiday calendar expansion | 🔲 |

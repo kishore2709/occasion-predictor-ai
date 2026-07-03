@@ -4,12 +4,14 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import org.kishorereddy.occasionpredictor.entity.Prediction;
 import org.kishorereddy.occasionpredictor.model.PredictionRequest;
 import org.kishorereddy.occasionpredictor.model.PredictionResponse;
 import org.kishorereddy.occasionpredictor.repository.PredictionRepository;
 import org.kishorereddy.occasionpredictor.service.PredictionService;
+import org.kishorereddy.occasionpredictor.service.RateLimiterService;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.server.ResponseStatusException;
@@ -26,11 +28,14 @@ public class OccasionController {
 
     private final PredictionService predictionService;
     private final PredictionRepository predictionRepository;
+    private final RateLimiterService rateLimiterService;
 
     public OccasionController(PredictionService predictionService,
-                              PredictionRepository predictionRepository) {
-        this.predictionService = predictionService;
+                              PredictionRepository predictionRepository,
+                              RateLimiterService rateLimiterService) {
+        this.predictionService   = predictionService;
         this.predictionRepository = predictionRepository;
+        this.rateLimiterService  = rateLimiterService;
     }
 
     @GetMapping("/health")
@@ -46,9 +51,12 @@ public class OccasionController {
     @ApiResponses({
             @ApiResponse(responseCode = "200", description = "Prediction completed successfully"),
             @ApiResponse(responseCode = "400", description = "Invalid prediction request"),
+            @ApiResponse(responseCode = "429", description = "Rate limit exceeded"),
             @ApiResponse(responseCode = "500", description = "Unexpected server error")
     })
-    public PredictionResponse makePrediction(@Valid @RequestBody PredictionRequest predictionRequest) {
+    public PredictionResponse makePrediction(@Valid @RequestBody PredictionRequest predictionRequest,
+                                             HttpServletRequest httpRequest) {
+        rateLimiterService.checkOrThrow(clientIp(httpRequest));
         return predictionService.predict(predictionRequest);
     }
 
@@ -73,5 +81,13 @@ public class OccasionController {
                 p.getPredictionSource(),
                 p.getEvidence()
         );
+    }
+
+    private String clientIp(HttpServletRequest request) {
+        String xff = request.getHeader("X-Forwarded-For");
+        if (xff != null && !xff.isBlank()) {
+            return xff.split(",")[0].trim();
+        }
+        return request.getRemoteAddr();
     }
 }
