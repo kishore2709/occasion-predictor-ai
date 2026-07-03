@@ -35,7 +35,7 @@ public class RagRetriever {
     public List<Document> retrieve(PredictionRequest request) {
         String query     = buildQuery(request);
         String queryHash = cacheService.hashQuery(query);
-        log.debug("RAG query for order {}: {}", request.orderId(), query);
+        log.debug("RAG query built for order={} hash={}", request.orderId(), queryHash);
 
         Optional<List<Document>> cached = cacheService.getCachedChunks(queryHash);
         if (cached.isPresent()) {

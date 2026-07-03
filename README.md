@@ -21,6 +21,8 @@ Part of a larger **Gift Reminder AI** platform where predicted occasions drive a
 | Database | PostgreSQL 18 |
 | Migrations | Flyway (single `V1__init.sql`) |
 | Docs | Springdoc OpenAPI / Swagger UI |
+| Security | Spring Security 6 + OAuth2 Resource Server (JWT) |
+| Auth provider | Keycloak 24 (optional — disabled by default for local dev) |
 | Build | Maven |
 
 ---
@@ -35,6 +37,7 @@ Part of a larger **Gift Reminder AI** platform where predicted occasions drive a
 | Redis | 7+ | `redis-server` or Docker |
 | Kafka | 3.7+ (KRaft) | `kafka-server-start` or Docker |
 | Ollama | Latest | Pull `llama3` + `nomic-embed-text` |
+| Keycloak | 24+ _(optional)_ | Docker recommended; skip for local dev (security disabled by default) |
 
 ---
 
@@ -93,6 +96,155 @@ Topics are created automatically on first app startup via `KafkaTopicConfig`.
 ollama pull llama3
 ollama pull nomic-embed-text
 ```
+
+### Keycloak (optional — only needed when `app.security.enabled=true`)
+
+Security is **off by default**. Skip this entire section for local development — all endpoints are open without a token.
+
+#### 1. Start Keycloak
+
+```bash
+docker compose up -d keycloak
+```
+
+Wait ~30 seconds, then open **http://localhost:8180** and log in with `admin` / `admin`.
+
+#### 2. Create the realm
+
+1. Click the realm dropdown (top-left, shows "Keycloak") → **Create realm**
+2. Name: `occasion-predictor`
+3. Click **Create**
+
+All following steps happen inside this realm.
+
+#### 3. Create the API client
+
+This client represents the Spring Boot app (or any service calling it).
+
+1. Left menu → **Clients** → **Create client**
+2. Fill in:
+   - Client type: `OpenID Connect`
+   - Client ID: `occasion-predictor-api`
+3. Click **Next**
+4. On the **Capability config** page, toggle **ON**:
+   - `Client authentication` (makes this a confidential client — gives you a secret)
+   - `Service accounts roles` (enables client-credentials / machine-to-machine flow)
+5. Click **Next** → **Save**
+
+#### 4. Copy the client secret
+
+1. Clients → `occasion-predictor-api` → **Credentials** tab
+2. Copy the value under **Client secret** — you will need it to get tokens
+
+#### 5. Create realm roles
+
+1. Left menu → **Realm roles** → **Create role** — repeat for each:
+
+| Role name | Who uses it |
+|---|---|
+| `ADMIN` | Full access — ops team, admin dashboards |
+| `SERVICE` | Other backend services calling this API (machine-to-machine) |
+| `REVIEWER` | Human users who read predictions (read-only) |
+| `READ_ONLY` | Health-check monitoring only |
+
+#### 6. Assign the SERVICE role to the client's service account
+
+The service account is the identity used in client-credentials flow.
+
+1. Clients → `occasion-predictor-api` → **Service accounts roles** tab
+2. Click **Assign role**
+3. Switch the filter to **Filter by realm roles**
+4. Select `SERVICE` → **Assign**
+
+The client can now call `POST /predictions` and `GET /predictions/{id}`.
+
+#### 7. (Optional) Create a human test user with ADMIN role
+
+1. Left menu → **Users** → **Create new user**
+2. Username: `admin-user`, Email verified: On → **Create**
+3. **Credentials** tab → **Set password** → enter a password, Temporary: Off
+4. **Role mappings** tab → **Assign role** → pick `ADMIN`
+
+#### 8. Start the app with security active
+
+```bash
+export SECURITY_ENABLED=true
+export JWT_ISSUER_URI=http://localhost:8180/realms/occasion-predictor
+mvn spring-boot:run
+```
+
+The app logs: `[SECURITY] OAuth2 JWT resource server active. Issuer: http://localhost:8180/realms/occasion-predictor`
+
+#### 9. Get a token and call the API
+
+**Machine-to-machine (client credentials — most common):**
+
+```bash
+# Get a token (replace YOUR_SECRET with the value from step 4)
+TOKEN=$(curl -s -X POST \
+  "http://localhost:8180/realms/occasion-predictor/protocol/openid-connect/token" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=client_credentials" \
+  -d "client_id=occasion-predictor-api" \
+  -d "client_secret=YOUR_SECRET" \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+
+# Call the API
+curl -X POST http://localhost:8081/api/v1/occasion/predictions \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "orderId": "ORD-001",
+    "recipientName": "Sarah",
+    "recipientRelation": "Mother",
+    "productName": "Luxury Rose Bouquet",
+    "productCategory": "Flowers",
+    "orderDate": "2025-05-08",
+    "giftMessage": "Happy Mothers Day!"
+  }'
+```
+
+**Human user (password flow — for ADMIN user created in step 7):**
+
+```bash
+TOKEN=$(curl -s -X POST \
+  "http://localhost:8180/realms/occasion-predictor/protocol/openid-connect/token" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=password" \
+  -d "client_id=occasion-predictor-api" \
+  -d "client_secret=YOUR_SECRET" \
+  -d "username=admin-user" \
+  -d "password=YOUR_PASSWORD" \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+
+# Replay an event (ADMIN only)
+curl -X POST http://localhost:8081/api/v1/occasion/admin/replay/ORD-001 \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+#### 10. What happens without a token (when security is on)
+
+```bash
+curl -X POST http://localhost:8081/api/v1/occasion/predictions \
+  -H "Content-Type: application/json" -d '{...}'
+# → 401 Unauthorized
+
+curl -X POST http://localhost:8081/api/v1/occasion/admin/replay/ORD-001 \
+  -H "Authorization: Bearer $SERVICE_TOKEN"   # SERVICE role, not ADMIN
+# → 403 Forbidden
+```
+
+#### Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| App won't start — `Connection refused localhost:8180` | Keycloak not running | `docker compose up -d keycloak` and wait 30 s |
+| `401 Unauthorized` | Missing or expired token | Re-fetch token; check `SECURITY_ENABLED=true` |
+| `403 Forbidden` | Token valid but wrong role | Check service-account role assignment in Keycloak |
+| `invalid_client` on token request | Wrong client secret | Re-copy secret from Clients → Credentials tab |
+| Roles not showing in JWT | Role not assigned to service account | Clients → Service accounts roles → re-assign |
+
+For local development without Keycloak, leave `app.security.enabled=false` (the default) — all endpoints remain open.
 
 ---
 
@@ -297,14 +449,15 @@ Each chunk carries metadata: `docName`, `category`, `section`, `country`, `brand
 ## Database Schema
 
 ```
-prompt_versions    — versioned LLM system instruction templates
-model_versions     — tracked Ollama model names and providers
-predictions        — one row per prediction (occasion, confidence, reason, evidence)
-prediction_audit   — raw prompt, raw LLM response, model parameters, rag_chunk_ids, latency_ms
-vector_store       — pgvector table (768-dim HNSW embeddings + JSON metadata per chunk)
+prompt_versions      — versioned LLM system instruction templates
+model_versions       — tracked Ollama model names and providers
+predictions          — one row per prediction (occasion, confidence, reason, evidence)
+prediction_audit     — raw prompt, raw LLM response, model parameters, rag_chunk_ids, latency_ms
+vector_store         — pgvector table (768-dim HNSW embeddings + JSON metadata per chunk)
+security_audit_log   — data-access and admin action audit trail (principal, action, resource, ip)
 ```
 
-Single Flyway migration (`V1__init.sql`) creates the full schema and seeds all reference data.
+Two Flyway migrations: `V1__init.sql` (full app schema + seed data) and `V2__add_security_audit.sql` (security audit table).
 
 ---
 
@@ -365,6 +518,15 @@ app:
     retry:
       max-attempts: 3                # prediction retries before DLQ
       backoff-ms: 2000               # base backoff (doubles each attempt)
+  security:
+    enabled: false                   # true + JWT_ISSUER_URI env var = full OAuth2/JWT enforcement
+
+spring:
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${JWT_ISSUER_URI:}   # e.g. http://localhost:8180/realms/occasion-predictor
 ```
 
 ---
@@ -376,6 +538,64 @@ app:
 | `prediction:{orderId}` | 24 h | `PredictionResponse` JSON — idempotency |
 | `rag:{sha256(query)}` | 30 min | `List<CachedChunk>` JSON — skip re-embed + vector search |
 | `rate:{ip}:{minuteWindow}` | 60 s | Request counter — fixed-window rate limiter |
+
+---
+
+## Security (Phase 10)
+
+### Roles
+
+| Role | Allowed endpoints |
+|---|---|
+| `ADMIN` | All endpoints including `/admin/replay/{orderId}` |
+| `SERVICE` | `POST /predictions`, `GET /predictions/{id}` (machine-to-machine) |
+| `REVIEWER` | `GET /predictions/{id}` (read-only human access) |
+| `READ_ONLY` | `GET /health` only |
+
+### Endpoint access matrix
+
+| Endpoint | ADMIN | SERVICE | REVIEWER | READ_ONLY | Anonymous |
+|---|---|---|---|---|---|
+| `GET /health` | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `POST /predictions` | ✅ | ✅ | — | — | dev only |
+| `GET /predictions/{id}` | ✅ | ✅ | ✅ | — | dev only |
+| `POST /admin/replay/{orderId}` | ✅ | — | — | — | dev only |
+
+"dev only" = permitted when `app.security.enabled=false` (local default).
+
+### JWT claim format
+
+Roles are read from the JWT using two strategies, tried in order:
+1. **Keycloak** — `realm_access.roles: ["ADMIN", "SERVICE"]`
+2. **Generic OIDC** — `roles: ["ADMIN", "SERVICE"]`
+
+Both lists are merged and prefixed with `ROLE_` before Spring Security evaluates access.
+
+### PII masking in logs
+
+| Field | Log output |
+|---|---|
+| `recipientName` | `Sarah` → `S***h` |
+| `giftMessage` | → `[REDACTED:42chars]` |
+| RAG query | Raw text suppressed; only its SHA-256 hash is logged |
+
+### Data access audit
+
+Every `POST /predictions`, `GET /predictions/{id}`, and `POST /admin/replay/{orderId}` writes
+a row to `security_audit_log` containing the JWT subject (`sub`), action name, resource ID,
+granted roles, and client IP. Lines also go to the `SECURITY_AUDIT` SLF4J logger, which can
+be routed to a dedicated audit appender in `logback-spring.xml`.
+
+---
+
+## Future Enhancements
+
+### Phase 9 — Rules Engine _(planned)_
+
+A deterministic pre-classification layer that runs before the LLM call. High-confidence
+rules (e.g. a gift message containing "Happy Mother's Day" with a date in May) would
+short-circuit to a result without consuming LLM tokens, improving throughput and reducing
+cost for straightforward cases. Planned as a future enhancement.
 
 ---
 
@@ -391,5 +611,5 @@ app:
 | 6 | RAG retrieval in prediction flow — top-k context → RAG prompt | ✅ |
 | 7 | Redis — idempotency cache, RAG retrieval cache, rate limiting | ✅ |
 | 8 | Kafka — event-driven pipeline, retry/DLQ, replay endpoint | ✅ |
-| 9 | _(planned)_ Feedback loop + confidence calibration | 🔲 |
-| 10 | _(planned)_ Multi-country holiday calendar expansion | 🔲 |
+| 9 | Rules engine — deterministic pre-classification layer _(future enhancement)_ | 🔲 |
+| 10 | Spring Security — OAuth2/JWT, role-based access, PII masking, data access audit | ✅ |

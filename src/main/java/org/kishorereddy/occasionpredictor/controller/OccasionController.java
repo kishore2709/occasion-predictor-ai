@@ -10,9 +10,11 @@ import org.kishorereddy.occasionpredictor.entity.Prediction;
 import org.kishorereddy.occasionpredictor.model.PredictionRequest;
 import org.kishorereddy.occasionpredictor.model.PredictionResponse;
 import org.kishorereddy.occasionpredictor.repository.PredictionRepository;
+import org.kishorereddy.occasionpredictor.security.SecurityAuditService;
 import org.kishorereddy.occasionpredictor.service.PredictionService;
 import org.kishorereddy.occasionpredictor.service.RateLimiterService;
 import org.springframework.http.HttpStatus;
+import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.server.ResponseStatusException;
 
@@ -29,13 +31,16 @@ public class OccasionController {
     private final PredictionService predictionService;
     private final PredictionRepository predictionRepository;
     private final RateLimiterService rateLimiterService;
+    private final SecurityAuditService securityAuditService;
 
     public OccasionController(PredictionService predictionService,
                               PredictionRepository predictionRepository,
-                              RateLimiterService rateLimiterService) {
-        this.predictionService   = predictionService;
+                              RateLimiterService rateLimiterService,
+                              SecurityAuditService securityAuditService) {
+        this.predictionService    = predictionService;
         this.predictionRepository = predictionRepository;
-        this.rateLimiterService  = rateLimiterService;
+        this.rateLimiterService   = rateLimiterService;
+        this.securityAuditService = securityAuditService;
     }
 
     @GetMapping("/health")
@@ -55,8 +60,10 @@ public class OccasionController {
             @ApiResponse(responseCode = "500", description = "Unexpected server error")
     })
     public PredictionResponse makePrediction(@Valid @RequestBody PredictionRequest predictionRequest,
+                                             Authentication auth,
                                              HttpServletRequest httpRequest) {
         rateLimiterService.checkOrThrow(clientIp(httpRequest));
+        securityAuditService.logAccess("CREATE_PREDICTION", predictionRequest.orderId(), auth, clientIp(httpRequest));
         return predictionService.predict(predictionRequest);
     }
 
@@ -69,7 +76,11 @@ public class OccasionController {
             @ApiResponse(responseCode = "200", description = "Prediction retrieved successfully"),
             @ApiResponse(responseCode = "404", description = "Prediction not found")
     })
-    public PredictionResponse getPrediction(@PathVariable UUID id) {
+    public PredictionResponse getPrediction(@PathVariable UUID id,
+                                            Authentication auth,
+                                            HttpServletRequest request) {
+        securityAuditService.logAccess("READ_PREDICTION", id.toString(), auth, clientIp(request));
+
         Prediction p = predictionRepository.findById(id)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Prediction not found: " + id));
 
