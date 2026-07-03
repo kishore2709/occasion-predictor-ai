@@ -41,6 +41,8 @@ app:
   rag:
     chunk-size: 800
     chunk-overlap: 100
+    top-k: 5
+    similarity-threshold: 0.5
 
 logging:
   level:

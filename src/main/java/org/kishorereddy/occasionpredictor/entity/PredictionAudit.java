@@ -33,6 +33,9 @@ public class PredictionAudit {
     @Column(columnDefinition = "TEXT")
     private String modelParameters;
 
+    @Column(columnDefinition = "TEXT")
+    private String ragChunkIds;
+
     private Long latencyMs;
 
     @CreationTimestamp

@@ -12,17 +12,30 @@ import org.kishorereddy.occasionpredictor.repository.PredictionRepository;
 import org.kishorereddy.occasionpredictor.repository.PromptVersionRepository;
 import org.kishorereddy.occasionpredictor.service.PredictionService;
 import org.kishorereddy.occasionpredictor.service.PredictionWorkflow;
+import org.kishorereddy.occasionpredictor.service.rag.RagPromptBuilder;
+import org.kishorereddy.occasionpredictor.service.rag.RagRetriever;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.ai.document.Document;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+
+import java.util.List;
+import java.util.stream.Collectors;
 
 @Service
 @Transactional
 public class PredictionServiceImpl implements PredictionService {
 
-    private static final String DEFAULT_PROMPT_TEMPLATE = """
-            You are a gift occasion classifier.
+    private static final Logger log = LoggerFactory.getLogger(PredictionServiceImpl.class);
 
-            Analyze the gift order below and determine the most likely gift occasion.
+    // Used when no active prompt_version row exists in the DB.
+    // Contains only system instructions — order details are appended by RagPromptBuilder.
+    private static final String DEFAULT_SYSTEM_INSTRUCTIONS = """
+            You are a gift occasion classifier with deep knowledge of gifting occasions.
+
+            Analyze the provided gift order using the retrieved context rules below, then predict the occasion.
+
             Respond with ONLY this JSON object — no explanation, no markdown, no extra text:
             {"occasion":"OCCASION_NAME","confidence":0.85,"reason":"One sentence explaining the prediction.","evidence":["signal 1","signal 2"]}
 
@@ -31,50 +44,49 @@ public class PredictionServiceImpl implements PredictionService {
             - confidence must be a decimal between 0.0 and 1.0
             - Use UNKNOWN with confidence below 0.4 when information is insufficient
             - reason must be a single sentence
-            - evidence must be a JSON array of 1–3 short strings citing signals from the order
-
-            Order Details:
-            - Recipient Name: %s
-            - Relation: %s
-            - Product: %s
-            - Category: %s
-            - Order Date: %s
-            - Gift Message: %s
+            - evidence must be a JSON array of 1-3 short strings citing signals from the order and retrieved rules
             """;
 
     private final PredictionWorkflow predictionWorkflow;
+    private final RagRetriever ragRetriever;
+    private final RagPromptBuilder ragPromptBuilder;
     private final PredictionRepository predictionRepository;
     private final PredictionAuditRepository auditRepository;
     private final PromptVersionRepository promptVersionRepository;
     private final ModelVersionRepository modelVersionRepository;
 
     public PredictionServiceImpl(PredictionWorkflow predictionWorkflow,
+                                 RagRetriever ragRetriever,
+                                 RagPromptBuilder ragPromptBuilder,
                                  PredictionRepository predictionRepository,
                                  PredictionAuditRepository auditRepository,
                                  PromptVersionRepository promptVersionRepository,
                                  ModelVersionRepository modelVersionRepository) {
-        this.predictionWorkflow = predictionWorkflow;
-        this.predictionRepository = predictionRepository;
-        this.auditRepository = auditRepository;
+        this.predictionWorkflow    = predictionWorkflow;
+        this.ragRetriever          = ragRetriever;
+        this.ragPromptBuilder      = ragPromptBuilder;
+        this.predictionRepository  = predictionRepository;
+        this.auditRepository       = auditRepository;
         this.promptVersionRepository = promptVersionRepository;
-        this.modelVersionRepository = modelVersionRepository;
+        this.modelVersionRepository  = modelVersionRepository;
     }
 
     @Override
     public PredictionResponse predict(PredictionRequest request) {
         PromptVersion promptVersion = promptVersionRepository.findByActiveTrue().orElse(null);
-        ModelVersion modelVersion = modelVersionRepository.findByActiveTrue().orElse(null);
+        ModelVersion  modelVersion  = modelVersionRepository.findByActiveTrue().orElse(null);
 
-        String template = promptVersion != null ? promptVersion.getTemplate() : DEFAULT_PROMPT_TEMPLATE;
-        String prompt = template.formatted(
-                request.recipientName(),
-                request.recipientRelation(),
-                request.productName(),
-                request.productCategory(),
-                request.orderDate(),
-                request.giftMessage()
-        );
+        // 1. Retrieve relevant RAG chunks from pgvector
+        List<Document> chunks = ragRetriever.retrieve(request);
+        log.debug("order={} rag_chunks={}", request.orderId(), chunks.size());
 
+        // 2. Build the final prompt: system instructions + context + order details
+        String systemInstructions = promptVersion != null
+                ? promptVersion.getTemplate()
+                : DEFAULT_SYSTEM_INSTRUCTIONS;
+        String prompt = ragPromptBuilder.build(systemInstructions, chunks, request);
+
+        // 3. Call the LLM
         long startTime = System.currentTimeMillis();
         PredictionWorkflow.LlmResult result = predictionWorkflow.call(prompt);
         long latencyMs = System.currentTimeMillis() - startTime;
@@ -83,6 +95,7 @@ public class PredictionServiceImpl implements PredictionService {
                 ? modelVersion.getProvider() + "_" + modelVersion.getModelName()
                 : "OLLAMA_CHAT_CLIENT";
 
+        // 4. Persist prediction
         Prediction prediction = new Prediction();
         prediction.setOrderId(request.orderId());
         prediction.setRecipientName(request.recipientName());
@@ -100,11 +113,13 @@ public class PredictionServiceImpl implements PredictionService {
         prediction.setModelVersion(modelVersion);
         predictionRepository.save(prediction);
 
+        // 5. Persist audit row with chunk IDs so we can replay which context was used
         PredictionAudit audit = new PredictionAudit();
         audit.setPrediction(prediction);
         audit.setRawPrompt(prompt);
         audit.setRawResponse(result.rawContent());
         audit.setModelParameters(result.modelParameters());
+        audit.setRagChunkIds(toJsonArray(chunks));
         audit.setLatencyMs(latencyMs);
         auditRepository.save(audit);
 
@@ -116,5 +131,12 @@ public class PredictionServiceImpl implements PredictionService {
                 source,
                 result.evidence()
         );
+    }
+
+    private String toJsonArray(List<Document> chunks) {
+        if (chunks.isEmpty()) return "[]";
+        return chunks.stream()
+                .map(d -> "\"" + d.getId() + "\"")
+                .collect(Collectors.joining(",", "[", "]"));
     }
 }
